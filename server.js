@@ -1,0 +1,18 @@
+const express=require('express');
+const http=require('http');
+const {Server}=require('socket.io');
+const Database=require('better-sqlite3');
+const path=require('path');
+const app=express(),server=http.createServer(app),io=new Server(server,{maxHttpBufferSize:1e6});
+const db=new Database(process.env.DB_PATH||path.join(__dirname,'plans.db'));
+db.pragma('journal_mode = WAL');
+db.exec('CREATE TABLE IF NOT EXISTS plans(id TEXT PRIMARY KEY,name TEXT NOT NULL,content TEXT NOT NULL,updated_at TEXT NOT NULL)');
+app.use(express.json({limit:'1mb'}));app.use(express.static(path.join(__dirname,'public')));
+const safeId=x=>typeof x==='string'&&/^[a-zA-Z0-9_-]{1,64}$/.test(x);
+const validContent=c=>c&&typeof c==='object'&&!Array.isArray(c)&&Array.isArray(c.items)&&c.items.length<=3000&&JSON.stringify(c).length<900000;
+app.get('/api/plans',(req,res)=>res.json(db.prepare('SELECT id,name,updated_at FROM plans ORDER BY updated_at DESC').all()));
+app.get('/api/plans/:id',(req,res)=>{if(!safeId(req.params.id))return res.sendStatus(400);const row=db.prepare('SELECT * FROM plans WHERE id=?').get(req.params.id);if(!row)return res.sendStatus(404);res.json({...row,content:JSON.parse(row.content)});});
+app.put('/api/plans/:id',(req,res)=>{const {id}=req.params,{name,content}=req.body;if(!safeId(id)||typeof name!=='string'||!name.trim()||name.length>100||!validContent(content))return res.status(400).json({error:'Invalid plan'});const updated_at=new Date().toISOString();db.prepare('INSERT INTO plans(id,name,content,updated_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,content=excluded.content,updated_at=excluded.updated_at').run(id,name.trim(),JSON.stringify(content),updated_at);io.emit('plans:changed',{id});res.json({id,updated_at});});
+app.delete('/api/plans/:id',(req,res)=>{if(!safeId(req.params.id))return res.sendStatus(400);db.prepare('DELETE FROM plans WHERE id=?').run(req.params.id);io.emit('plans:changed',{id:req.params.id,deleted:true});res.sendStatus(204);});
+io.on('connection',socket=>{socket.on('join',id=>{if(safeId(id)){socket.rooms.forEach(r=>r!==socket.id&&socket.leave(r));socket.join(id);}});socket.on('plan:live',data=>{if(!data||!safeId(data.id)||!socket.rooms.has(data.id)||!validContent(data.content))return;socket.to(data.id).emit('plan:live',{id:data.id,content:data.content,name:String(data.name||'').slice(0,100)});});});
+const port=process.env.PORT||3000;server.listen(port,()=>console.log('FiveM Tactical Map running on port '+port));
